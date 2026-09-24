@@ -1,0 +1,11 @@
+# Operating System
+.DS_Store
+Thumbs.db
+
+# Roc build artifacts / binaries
+main
+*.o
+*.a
+*.so
+*.dylib
+*.dll
