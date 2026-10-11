@@ -1,10 +1,10 @@
 app [main!] {
-	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.22.2/9zUBxb1LtXYVc4eR4hAtd1WQDwBYDhM6HQdZz1UFCm2m.tar.zst",
+	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.25.0/CZsY7tYZwR3rj9kYbpaCfxki2yVAaRL8bBwMLvB2xkbA.tar.zst",
 }
 
 import pf.Stdout
 import pf.Tcp
-import pf.IOErr exposing [IOErr]
+import pf.IOErr
 
 default_ip = "127.0.0.1"
 
@@ -224,7 +224,7 @@ encode_message = |message|
 						|> List.concat(encode_str(reply_to))
 						|> List.concat(encode_num(List.len(payload)))
 						|> List.concat(encode_payload(payload))
-				}
+			}
 
 		SUB({ subject, queue_group, sid }) =>
 			Str.to_utf8("SUB")
