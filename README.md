@@ -23,12 +23,12 @@ The experiment tests basic protocol interactions defined by the [NATS Protocol S
 
 ## Running the Experiment
 
-### Option 1: Using Docker (`make run`)
+### Option 1: Using Docker (`make all` or `make`)
 
-A helper `Makefile` is included to start a temporary NATS container on port `4222`, run the Roc code, and tear down the container when done:
+A helper `Makefile` is included to format files, start a temporary NATS container on port `4222`, run the Roc code, and tear down the container when done:
 
 ```sh
-make run
+make
 ```
 
 ### Option 2: Against an Existing NATS Server

@@ -1,16 +1,17 @@
 app [main!] {
-	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.25.0/CZsY7tYZwR3rj9kYbpaCfxki2yVAaRL8bBwMLvB2xkbA.tar.zst",
+	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.27.0/9yjxqdGTP4xSpSEmDazwTmRsehfRZzA19pwEKkR6fj1g.tar.zst",
 }
 
 import pf.Stdout
 import pf.Tcp
 import pf.IOErr
+import pf.Duration
 
 default_ip = "127.0.0.1"
 
 default_port = 4222
 
-timeout_ms = 60_000
+timeout = Duration.seconds(60)
 
 max_bytes = 1_048_576
 
@@ -143,7 +144,7 @@ opt_str = |fields, key, val|
 opt_bool : List(List(U8)), Str, Try(Bool, [Missing]) -> List(List(U8))
 opt_bool = |fields, key, val|
 	match val {
-		Ok(v) => List.append(fields, Str.to_utf8("\"${key}\":${if v "true" else "false"}"))
+		Ok(v) => List.append(fields, Str.to_utf8("\"${key}\":${if (v) "true" else "false"}"))
 		Err(Missing) => fields
 	}
 
@@ -151,9 +152,9 @@ encode_connect : ConnectOptions -> List(U8)
 encode_connect = |opts| {
 	fields =
 		[
-			Str.to_utf8("\"verbose\":${if opts.verbose "true" else "false"}"),
-			Str.to_utf8("\"pedantic\":${if opts.pedantic "true" else "false"}"),
-			Str.to_utf8("\"tls_required\":${if opts.tls_required "true" else "false"}"),
+			Str.to_utf8("\"verbose\":${if (opts.verbose) "true" else "false"}"),
+			Str.to_utf8("\"pedantic\":${if (opts.pedantic) "true" else "false"}"),
+			Str.to_utf8("\"tls_required\":${if (opts.tls_required) "true" else "false"}"),
 			Str.to_utf8("\"lang\":\"${opts.lang}\""),
 			Str.to_utf8("\"version\":\"${opts.version}\""),
 			Str.to_utf8("\"protocol\":${U64.to_str(opts.protocol)}"),
@@ -191,12 +192,11 @@ encode_payload = |b| match b {
 	data => List.concat(crlf, data)
 }
 
-skip_trailing_crlf! : Tcp.Stream => Try({}, [TcpUnexpectedEOF, TcpReadErr(Tcp.StreamErr)])
-skip_trailing_crlf! = |stream| {
-	match Tcp.Stream.read_exactly!(stream, 2, timeout_ms) {
+skip_trailing_crlf! : Tcp.Connection => Try({}, [UnexpectedEndOfInput, Interrupted, TcpErr(IOErr)])
+skip_trailing_crlf! = |conn| {
+	match conn.read_exactly!(2) {
 		Ok(['\r', '\n']) => Ok({})
-		Ok(_) => Err(TcpUnexpectedEOF)
-		Err(TcpReadErr(TimedOut)) => skip_trailing_crlf!(stream)
+		Ok(_) => Err(UnexpectedEndOfInput)
 		Err(err) => Err(err)
 	}
 }
@@ -241,33 +241,24 @@ encode_message = |message|
 		PONG => Str.to_utf8("PONG")
 	}
 
-read_line! : Tcp.Stream, List(U8) => Try(List(U8), [TcpUnexpectedEOF, TcpReadErr(Tcp.StreamErr), TcpReadLimitExceeded(U64)])
-read_line! = |stream, acc| {
-	match Tcp.Stream.read_exactly!(stream, 1, timeout_ms) {
-		Ok(['\n']) =>
-			if List.ends_with(acc, ['\r']) {
-				Ok(List.drop_last(acc, 1))
-			} else {
-				Ok(acc)
-			}
-		Ok(byte) => read_line!(stream, List.concat(acc, byte))
-		Err(TcpReadErr(TimedOut)) => read_line!(stream, acc)
-		Err(err) => Err(err)
-	}
+read_line! : Tcp.Connection => Try(List(U8), [EndOfInput, ReadLimitExceeded(U64), BadUtf8({ problem : Str.Utf8Problem, index : U64 }), Interrupted, TcpErr(IOErr)])
+read_line! = |conn| {
+	line = conn.read_line!()?
+	Ok(Str.to_utf8(line))
 }
 
-read_payload! : Tcp.Stream, U64 => Try(List(U8), [TcpUnexpectedEOF, TcpReadErr(Tcp.StreamErr)])
-read_payload! = |stream, num_bytes| {
-	payload = Tcp.Stream.read_exactly!(stream, num_bytes, timeout_ms)?
-	skip_trailing_crlf!(stream)?
+read_payload! : Tcp.Connection, U64 => Try(List(U8), [UnexpectedEndOfInput, Interrupted, TcpErr(IOErr)])
+read_payload! = |conn, num_bytes| {
+	payload = conn.read_exactly!(num_bytes)?
+	skip_trailing_crlf!(conn)?
 	Ok(payload)
 }
 
-read_hmsg! : Tcp.Stream, U64, U64 => Try({ hdr : List(U8), body : List(U8) }, [TcpUnexpectedEOF, TcpReadErr(Tcp.StreamErr)])
-read_hmsg! = |stream, hdr_bytes, total_bytes| {
-	hdr = Tcp.Stream.read_exactly!(stream, hdr_bytes, timeout_ms)?
-	body = Tcp.Stream.read_exactly!(stream, total_bytes - hdr_bytes, timeout_ms)?
-	skip_trailing_crlf!(stream)?
+read_hmsg! : Tcp.Connection, U64, U64 => Try({ hdr : List(U8), body : List(U8) }, [UnexpectedEndOfInput, Interrupted, TcpErr(IOErr)])
+read_hmsg! = |conn, hdr_bytes, total_bytes| {
+	hdr = conn.read_exactly!(hdr_bytes)?
+	body = conn.read_exactly!(total_bytes - hdr_bytes)?
+	skip_trailing_crlf!(conn)?
 	Ok({ hdr, body })
 }
 
@@ -321,31 +312,31 @@ parse_hmsg_fields = |bytes| {
 	}
 }
 
-write_msg! : Tcp.Stream, ClientMessage => Try({}, [TcpWriteErr(Tcp.StreamErr), StdoutErr(IOErr), BadUtf8({ problem : Str.Utf8Problem, index : U64 })])
-write_msg! = |stream, message| {
+write_msg! : Tcp.Connection, ClientMessage => Try({}, [Interrupted, TcpErr(IOErr), StdoutErr(IOErr)])
+write_msg! = |conn, message| {
 	Stdout.write!("WRITE: ")?
 	Stdout.line!(Str.inspect(message))?
 	bytes = encode_message(message)
-	Tcp.Stream.write!(stream, List.concat(bytes, crlf), timeout_ms)
+	conn.write_bytes!(List.concat(bytes, crlf))
 }
 
-handle_message! : Tcp.Stream => Try({}, [NatsErr(Str), ParsingFailure(Str), MissingRequiredField(Str), InvalidJson(Str), BadUtf8({ problem : Str.Utf8Problem, index : U64 }), OutOfBounds, TcpUnexpectedEOF, TcpReadErr(Tcp.StreamErr), TcpReadLimitExceeded(U64), StdoutErr(IOErr), TcpWriteErr(Tcp.StreamErr), BadNumStr])
-handle_message! = |stream| {
-	bytes = read_line!(stream, [])?
+handle_message! : Tcp.Connection => Try({}, [NatsErr(Str), ParsingFailure(Str), MissingRequiredField(Str), InvalidJson(Str), BadUtf8({ problem : Str.Utf8Problem, index : U64 }), EndOfInput, UnexpectedEndOfInput, ReadLimitExceeded(U64), StdoutErr(IOErr), TcpErr(IOErr), Interrupted, BadNumStr])
+handle_message! = |conn| {
+	bytes = read_line!(conn)?
 	message = decode_server(bytes)?
 
 	Stdout.write!("READ: ")?
 	Stdout.line!(Str.inspect(message))?
 
 	match message {
-		PING => write_msg!(stream, PONG)
+		PING => write_msg!(conn, PONG)
 		OK => Ok({})
 		ERR(err) => Err(NatsErr(err))
 		MSG({ payload_bytes, header_bytes, total_bytes, .. }) => {
 			match header_bytes {
 				Ok(hdr_bytes) => {
 					read_result = read_hmsg!(
-						stream,
+						conn,
 						hdr_bytes,
 						match total_bytes {
 							Ok(tb) => tb
@@ -358,7 +349,7 @@ handle_message! = |stream| {
 					}
 				}
 				Err(Missing) => {
-					read_result = read_payload!(stream, payload_bytes)
+					read_result = read_payload!(conn, payload_bytes)
 					match read_result {
 						Ok(_) => Ok({})
 						Err(err) => Err(err)
@@ -371,9 +362,9 @@ handle_message! = |stream| {
 	}
 }
 
-handshake! : Tcp.Stream => Try({}, [NatsErr(Str), ParsingFailure(Str), MissingRequiredField(Str), InvalidJson(Str), BadUtf8({ problem : Str.Utf8Problem, index : U64 }), OutOfBounds, TcpUnexpectedEOF, TcpReadErr(Tcp.StreamErr), TcpReadLimitExceeded(U64), StdoutErr(IOErr), TcpWriteErr(Tcp.StreamErr), BadNumStr])
-handshake! = |stream| {
-	bytes = read_line!(stream, [])?
+handshake! : Tcp.Connection => Try({}, [NatsErr(Str), ParsingFailure(Str), MissingRequiredField(Str), InvalidJson(Str), BadUtf8({ problem : Str.Utf8Problem, index : U64 }), EndOfInput, ReadLimitExceeded(U64), StdoutErr(IOErr), TcpErr(IOErr), Interrupted, BadNumStr])
+handshake! = |conn| {
+	bytes = read_line!(conn)?
 	msg = decode_server(bytes)?
 	Stdout.write!("READ: ")?
 	Stdout.line!(Str.inspect(msg))?
@@ -381,11 +372,11 @@ handshake! = |stream| {
 	connect_opts = { verbose: True, pedantic: False, tls_required: False, lang: "roc", version: "0.1.0", protocol: 1, auth_token: Err(Missing), user: Err(Missing), pass: Err(Missing), name: Err(Missing), echo: Err(Missing), sig: Err(Missing), jwt: Err(Missing), no_responders: Err(Missing), headers: Err(Missing), nkey: Err(Missing) }
 
 	match msg {
-		INFO(_) => write_msg!(stream, CONNECT(connect_opts))
+		INFO(_) => write_msg!(conn, CONNECT(connect_opts))
 		_ => Err(NatsErr("Expected INFO"))
 	}?
 
-	bytes2 = read_line!(stream, [])?
+	bytes2 = read_line!(conn)?
 	msg2 = decode_server(bytes2)?
 	Stdout.write!("READ: ")?
 	Stdout.line!(Str.inspect(msg2))?
@@ -396,33 +387,33 @@ handshake! = |stream| {
 	}
 }
 
-run! : Tcp.Stream => Try({}, [NatsErr(Str), ParsingFailure(Str), MissingRequiredField(Str), InvalidJson(Str), BadUtf8({ problem : Str.Utf8Problem, index : U64 }), OutOfBounds, TcpUnexpectedEOF, TcpReadErr(Tcp.StreamErr), TcpReadLimitExceeded(U64), StdoutErr(IOErr), TcpWriteErr(Tcp.StreamErr), BadNumStr])
-run! = |stream| {
-	handshake!(stream)?
+run! : Tcp.Connection => Try({}, [NatsErr(Str), ParsingFailure(Str), MissingRequiredField(Str), InvalidJson(Str), BadUtf8({ problem : Str.Utf8Problem, index : U64 }), EndOfInput, UnexpectedEndOfInput, ReadLimitExceeded(U64), StdoutErr(IOErr), TcpErr(IOErr), Interrupted, BadNumStr])
+run! = |conn| {
+	handshake!(conn)?
 
 	sub_opts = { subject: "test.>", queue_group: "", sid: "1" }
-	write_msg!(stream, SUB(sub_opts))?
+	write_msg!(conn, SUB(sub_opts))?
 
 	pub_opts = { subject: "test.hello", reply_to: "", headers: Err(Missing), payload: Str.to_utf8("Hello from Roc!") }
-	write_msg!(stream, PUB(pub_opts))?
+	write_msg!(conn, PUB(pub_opts))?
 
-	loop!(stream)
+	loop!(conn)
 }
 
-loop! : Tcp.Stream => Try({}, [NatsErr(Str), ParsingFailure(Str), MissingRequiredField(Str), InvalidJson(Str), BadUtf8({ problem : Str.Utf8Problem, index : U64 }), OutOfBounds, TcpUnexpectedEOF, TcpReadErr(Tcp.StreamErr), TcpReadLimitExceeded(U64), StdoutErr(IOErr), TcpWriteErr(Tcp.StreamErr), BadNumStr])
-loop! = |stream| {
-	handle_message!(stream)?
-	loop!(stream)
+loop! : Tcp.Connection => Try({}, [NatsErr(Str), ParsingFailure(Str), MissingRequiredField(Str), InvalidJson(Str), BadUtf8({ problem : Str.Utf8Problem, index : U64 }), EndOfInput, UnexpectedEndOfInput, ReadLimitExceeded(U64), StdoutErr(IOErr), TcpErr(IOErr), Interrupted, BadNumStr])
+loop! = |conn| {
+	handle_message!(conn)?
+	loop!(conn)
 }
 
-main! : List([Utf8(Str), UnixBytes(List(U8)), WindowsU16s(List(U16))]) => Try({}, [Exit(I32), StdoutErr(IOErr)])
+main! : List([Utf8(Str), UnixBytes(List(U8)), WindowsU16s(List(U16))]) => Try({}, [Exit(I32), Interrupted, StdoutErr(IOErr)])
 main! = |_| {
 	Stdout.line!("Connecting to NATS at ${default_ip}:${U16.to_str(default_port)}")?
 
-	match Tcp.connect!(default_ip, default_port, timeout_ms) {
-		Ok(stream) => {
+	match Tcp.connect!(default_ip, default_port, { connect_timeout: timeout, io_timeout: timeout }) {
+		Ok(conn) => {
 			Stdout.line!("Successfully connected")?
-			match run!(stream) {
+			match run!(conn) {
 				Ok({}) => Ok({})
 				Err(err) => {
 					Stdout.write!("ERROR: ")?
